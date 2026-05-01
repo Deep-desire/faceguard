@@ -1,0 +1,105 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# FaceGuard Pro – .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+env/
+ENV/
+
+# ── Database ──────────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Uploaded face images (user data — never commit) ──────────────────────────
+backend/uploads/
+
+# ── AI / ML model weights (large binary files — download separately) ──────────
+# YOLOv8 face detection model
+backend/*.pt
+backend/*.onnx
+
+# InsightFace buffalo_l ONNX models (det_10g.onnx ~17 MB, w600k_r50.onnx ~174 MB)
+backend/insightface_models/
+
+# DeepFace model cache (auto-downloaded by DeepFace on first run)
+backend/.deepface/
+~/.deepface/
+
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# ── Node.js / React ───────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/build/
+frontend/.pnp
+frontend/.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+backend/logs/
+
+# ── OS generated files ────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── IDE / Editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ── Docker volumes (local dev) ────────────────────────────────────────────────
+data/
+
+# ── Miscellaneous artefacts ───────────────────────────────────────────────────
+# Typo directory created by failed brace-expansion (mkdir {backend,frontend})
+{backend,frontend}/
+
+# One-time migration script (optional — safe to commit but not needed by others)
+# backend/re_embed_employees.py
