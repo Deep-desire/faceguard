@@ -15,6 +15,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -175,6 +177,7 @@ async def add_employee(
     images: list[UploadFile] = File(...),
 ):
     emp_id = str(uuid.uuid4())
+    employee_code = employee_code.strip()
     face_id = f"EMP-{employee_code.upper()}"
 
     # Save uploaded images & extract embeddings
@@ -193,9 +196,16 @@ async def add_employee(
         # Extract embedding
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            log.warning(f"Failed to decode image {idx} for {name}")
+            continue
+        
         embedding = face_engine.extract_embedding(img)
         if embedding is not None:
             embeddings.append(embedding.tolist())
+            log.debug(f"✅ Extracted embedding #{idx+1} for {name}")
+        else:
+            log.warning(f"⚠️  No embedding extracted from image #{idx+1} for {name}")
 
     if not embeddings:
         raise HTTPException(400, "No valid face detected in uploaded images")
@@ -217,7 +227,7 @@ async def add_employee(
     }
     db.insert_employee(employee)
     face_engine.register_face(emp_id, face_id, name, avg_embedding)
-    log.info(f"Employee registered: {name} | {face_id}")
+    log.info(f"✅ Employee registered: {name} | {face_id} | {len(embeddings)} photos averaged")
     return _format_employee(employee)
 
 
@@ -226,6 +236,7 @@ async def update_employee(
     emp_id: str,
     name: Optional[str] = Form(None),
     department: Optional[str] = Form(None),
+    employee_code: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
     phone: Optional[str] = Form(None),
     images: Optional[list[UploadFile]] = File(None),
@@ -239,11 +250,15 @@ async def update_employee(
         updates["name"] = name
     if department:
         updates["department"] = department
-    if email:
-        updates["email"] = email
-    if phone:
-        updates["phone"] = phone
+    if employee_code and employee_code.strip():
+        updates["employee_code"] = employee_code.strip()
+        updates["face_id"] = f"EMP-{employee_code.strip().upper()}"
+    if email is not None:
+        updates["email"] = email.strip() or None
+    if phone is not None:
+        updates["phone"] = phone.strip() or None
 
+    embedding_source = None
     if images:
         emp_dir = UPLOAD_DIR / emp_id
         emp_dir.mkdir(parents=True, exist_ok=True)
@@ -264,10 +279,26 @@ async def update_employee(
             avg_embedding = np.mean(embeddings, axis=0).tolist()
             updates["embedding"] = json.dumps(avg_embedding)
             updates["image_paths"] = json.dumps(saved_paths)
-            face_engine.update_face(emp_id, avg_embedding)
+            embedding_source = avg_embedding
+
+    if embedding_source is None:
+        embedding_value = emp.get("embedding")
+        if embedding_value:
+            embedding_source = json.loads(embedding_value)
+
+    if images:
+        if "embedding" in updates:
+            embedding_source = json.loads(updates["embedding"])
 
     db.update_employee(emp_id, updates)
     updated = db.get_employee(emp_id)
+    if updated and embedding_source is not None:
+        face_engine.register_face(
+            emp_id,
+            updated["face_id"],
+            updated["name"],
+            embedding_source,
+        )
     return _format_employee(updated)
 
 
@@ -310,28 +341,65 @@ async def list_events(limit: int = 100, camera_id: Optional[str] = None):
 # WEBSOCKET - Live Feed
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HEALTH CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/health")
+async def health_check():
+    embed_backend = getattr(face_engine, "_embed_backend", "unknown")
+    registered_count = face_engine.face_count()
+    return {
+        "status":           "ok",
+        "active_cameras":   sum(1 for c in db.get_all_cameras() if camera_manager.is_active(c["id"])),
+        "registered_faces": registered_count,
+        "embed_backend":    embed_backend,
+        "total_employees":  len(db.get_all_employees()),
+        "insight_onnx":     "available" if face_engine._insight_onnx is not None else "unavailable",
+        "deepface":         "available" if face_engine._deepface is not None else "unavailable",
+        "yolo":             "available" if face_engine._yolo is not None else "unavailable",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET - Live Feed
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.websocket("/ws/camera/{cam_id}")
 async def camera_stream(websocket: WebSocket, cam_id: str):
-    # Disable library-level keepalive pings — we're sending frames continuously
-    # and the ping races with frame data, causing buffer assertion errors.
-    websocket._send_queue = None   # no-op guard
+    """
+    Streams JPEG frames as base64-encoded JSON to the browser.
+
+    Why ws_ping_interval is disabled:
+      The websockets library's keepalive ping task races with our continuous
+      frame writes.  Both try to drain() the same transport simultaneously,
+      triggering the internal assertion:
+          assert waiter is None or waiter.cancelled()
+      Fix: pass --ws-ping-interval 0 to uvicorn on the CLI (see start.ps1)
+      so no background ping task is ever started.
+    """
     await websocket.accept()
     log.info(f"WS connected: camera {cam_id}")
     try:
         async for frame_data in camera_manager.frame_generator(cam_id):
             try:
-                payload = json.dumps(frame_data)
-                # If the client can't receive within 1.5 s, drop this frame
+                # Timeout so a slow client never blocks the generator
                 await asyncio.wait_for(
-                    websocket.send_text(payload),
+                    websocket.send_text(json.dumps(frame_data)),
                     timeout=1.5,
                 )
             except asyncio.TimeoutError:
-                pass   # frame dropped — client is backlogged, continue
+                # Client is backlogged — drop this frame and continue
+                continue
+            except (WebSocketDisconnect, RuntimeError):
+                # Client closed connection mid-send
+                break
     except WebSocketDisconnect:
         log.info(f"WS disconnected: camera {cam_id}")
+    except asyncio.CancelledError:
+        pass  # server shutdown — clean exit
     except Exception as e:
-        log.debug(f"WS closed for {cam_id}: {type(e).__name__}")
+        log.debug(f"WS closed for {cam_id}: {type(e).__name__}: {e}")
     finally:
         log.info(f"WS session ended: camera {cam_id}")
 
@@ -344,10 +412,24 @@ async def events_stream(websocket: WebSocket):
         while True:
             event = await camera_manager.get_latest_event()
             if event:
-                await websocket.send_text(json.dumps(event))
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_text(json.dumps(event)),
+                        timeout=1.5,
+                    )
+                except asyncio.TimeoutError:
+                    pass  # client backlogged, skip this event
+                except (WebSocketDisconnect, RuntimeError):
+                    break
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         log.info("WS events stream disconnected")
+    except asyncio.CancelledError:
+        pass  # server shutdown
+    except Exception as e:
+        log.debug(f"WS events closed: {type(e).__name__}: {e}")
+    finally:
+        log.info("WS events stream ended")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -370,8 +452,13 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        ws_ping_interval=None,   # disable keepalive pings — we stream frames continuously
+        # ── WebSocket ping MUST be disabled ─────────────────────────────────
+        # The websockets library's keepalive ping task races with our frame
+        # sends and causes:  AssertionError in _drain_helper.
+        # Passing None (or 0) eliminates the background ping task entirely.
+        ws_ping_interval=None,
         ws_ping_timeout=None,
+        ws_max_size=16_777_216,  # 16 MB frame payload headroom
     )
 
 

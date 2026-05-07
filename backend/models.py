@@ -42,6 +42,7 @@ class EmployeeCreate(BaseModel):
 class EmployeeUpdate(BaseModel):
     name: Optional[str] = None
     department: Optional[str] = None
+    employee_code: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
 

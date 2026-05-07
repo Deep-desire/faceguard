@@ -76,12 +76,15 @@ pip install -r requirements.txt
 # InsightFace models are optional; if installed, they auto-download on first run (~500MB)
 
 # Start the server
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload --ws-ping-interval 0 --ws-ping-timeout 0
 ```
 
 Important: always start the backend from the activated `backend/venv`. If you run
 plain `uvicorn` from a global Python install, it can pick up NumPy 2.x and break
 OpenCV with the exact error you saw.
+
+On Windows, prefer `start.ps1` because it already disables websocket keepalive
+pings and avoids the `keepalive ping failed` assertion during live camera streaming.
 
 On Windows, the default install now uses OpenCV + YOLO only and the app starts in
 fallback face-embedding mode. To enable full ArcFace embeddings, install

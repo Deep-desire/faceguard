@@ -1,23 +1,76 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import { getEmployees, addEmployee, deleteEmployee } from "../api";
+import { getEmployees, addEmployee, updateEmployee, deleteEmployee } from "../api";
 import toast from "react-hot-toast";
-import { Users, Plus, Trash2, Upload, X, UserCheck } from "lucide-react";
+import {
+  Building2,
+  Image as ImageIcon,
+  Mail,
+  Pencil,
+  Phone,
+  Plus,
+  Trash2,
+  Upload,
+  Users,
+  X,
+} from "lucide-react";
+
+const DEPARTMENTS = [
+  "Engineering",
+  "HR",
+  "Finance",
+  "Operations",
+  "Security",
+  "Management",
+  "IT",
+  "Sales",
+  "Marketing",
+];
+
+const EMPTY_FORM = {
+  name: "",
+  department: "",
+  employee_code: "",
+  email: "",
+  phone: "",
+};
+
+const UPLOADS_BASE = "http://localhost:8000/uploads/";
+
+function buildImageUrl(path) {
+  if (!path) return "";
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  return `${UPLOADS_BASE}${path}`;
+}
+
+function initials(name) {
+  if (!name) return "?";
+  return name
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("");
+}
 
 export default function Employees() {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState(false);
-  const [form, setForm] = useState({ name: "", department: "", employee_code: "", email: "", phone: "" });
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState(null);
+  const [form, setForm] = useState(EMPTY_FORM);
   const [files, setFiles] = useState([]);
   const [previews, setPreviews] = useState([]);
+  const [existingPhotos, setExistingPhotos] = useState([]);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+  }, []);
 
   useEffect(() => {
-    return () => previews.forEach(URL.revokeObjectURL);
+    return () => previews.forEach((url) => URL.revokeObjectURL(url));
   }, [previews]);
 
   async function load() {
@@ -31,9 +84,12 @@ export default function Employees() {
     }
   }
 
-  const onDrop = useCallback((accepted) => {
-    setFiles(prev => [...prev, ...accepted]);
-    setPreviews(prev => [...prev, ...accepted.map(f => URL.createObjectURL(f))]);
+  const onDrop = useCallback((acceptedFiles) => {
+    setFiles((prev) => [...prev, ...acceptedFiles]);
+    setPreviews((prev) => [
+      ...prev,
+      ...acceptedFiles.map((file) => URL.createObjectURL(file)),
+    ]);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -42,17 +98,43 @@ export default function Employees() {
     multiple: true,
   });
 
-  function removeFile(idx) {
-    URL.revokeObjectURL(previews[idx]);
-    setFiles(f => f.filter((_, i) => i !== idx));
-    setPreviews(p => p.filter((_, i) => i !== idx));
-  }
-
-  function openModal() {
-    setForm({ name: "", department: "", employee_code: "", email: "", phone: "" });
+  function resetDraft() {
+    setModalOpen(false);
+    setEditingEmployee(null);
+    setForm(EMPTY_FORM);
     setFiles([]);
     setPreviews([]);
-    setModal(true);
+    setExistingPhotos([]);
+  }
+
+  function openCreateModal() {
+    setEditingEmployee(null);
+    setForm(EMPTY_FORM);
+    setFiles([]);
+    setPreviews([]);
+    setExistingPhotos([]);
+    setModalOpen(true);
+  }
+
+  function openEditModal(emp) {
+    setEditingEmployee(emp);
+    setForm({
+      name: emp.name || "",
+      department: emp.department || "",
+      employee_code: emp.employee_code || "",
+      email: emp.email || "",
+      phone: emp.phone || "",
+    });
+    setFiles([]);
+    setPreviews([]);
+    setExistingPhotos(emp.image_paths || []);
+    setModalOpen(true);
+  }
+
+  function removeFile(idx) {
+    URL.revokeObjectURL(previews[idx]);
+    setFiles((current) => current.filter((_, i) => i !== idx));
+    setPreviews((current) => current.filter((_, i) => i !== idx));
   }
 
   async function save() {
@@ -60,26 +142,40 @@ export default function Employees() {
       toast.error("Name, Employee Code and Department are required");
       return;
     }
-    if (files.length === 0) {
+
+    if (!editingEmployee && files.length === 0) {
       toast.error("Please upload at least one face photo");
       return;
     }
+
     setSaving(true);
     try {
       const fd = new FormData();
-      fd.append("name", form.name);
-      fd.append("department", form.department);
-      fd.append("employee_code", form.employee_code);
-      if (form.email) fd.append("email", form.email);
-      if (form.phone) fd.append("phone", form.phone);
-      files.forEach(f => fd.append("images", f));
+      fd.append("name", form.name.trim());
+      fd.append("department", form.department.trim());
+      fd.append("employee_code", form.employee_code.trim());
+      if (form.email.trim()) fd.append("email", form.email.trim());
+      if (form.phone.trim()) fd.append("phone", form.phone.trim());
+      files.forEach((file) => fd.append("images", file));
 
-      const emp = await addEmployee(fd);
-      setEmployees(prev => [emp, ...prev]);
-      toast.success(`Employee "${emp.name}" registered · ${emp.face_id}`);
-      setModal(false);
-    } catch (e) {
-      toast.error(e.response?.data?.detail || "Registration failed");
+      const emp = editingEmployee
+        ? await updateEmployee(editingEmployee.id, fd)
+        : await addEmployee(fd);
+
+      setEmployees((prev) =>
+        editingEmployee
+          ? prev.map((item) => (item.id === emp.id ? emp : item))
+          : [emp, ...prev]
+      );
+
+      toast.success(
+        editingEmployee
+          ? `Employee "${emp.name}" updated`
+          : `Employee "${emp.name}" registered`
+      );
+      resetDraft();
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || "Save failed");
     } finally {
       setSaving(false);
     }
@@ -87,16 +183,28 @@ export default function Employees() {
 
   async function remove(id, name) {
     if (!window.confirm(`Remove employee "${name}" and their face data?`)) return;
-    await deleteEmployee(id);
-    setEmployees(prev => prev.filter(e => e.id !== id));
-    toast.success("Employee removed");
+
+    try {
+      await deleteEmployee(id);
+      setEmployees((prev) => prev.filter((employee) => employee.id !== id));
+      toast.success("Employee removed");
+    } catch {
+      toast.error("Failed to remove employee");
+    }
   }
 
-  const filtered = employees.filter(e =>
-    e.name.toLowerCase().includes(search.toLowerCase()) ||
-    e.department?.toLowerCase().includes(search.toLowerCase()) ||
-    e.face_id.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = employees.filter((employee) => {
+    const query = search.toLowerCase();
+    return (
+      employee.name?.toLowerCase().includes(query) ||
+      employee.department?.toLowerCase().includes(query) ||
+      employee.face_id?.toLowerCase().includes(query) ||
+      employee.employee_code?.toLowerCase().includes(query) ||
+      employee.email?.toLowerCase().includes(query)
+    );
+  });
+
+  const isEditMode = Boolean(editingEmployee);
 
   return (
     <div className="page">
@@ -107,142 +215,287 @@ export default function Employees() {
 
       <div className="toolbar">
         <div className="toolbar-left">
-          <input className="input" style={{ width: 260 }} placeholder="Search by name, dept, face ID..."
-            value={search} onChange={e => setSearch(e.target.value)} />
+          <input
+            className="input"
+            style={{ width: 300 }}
+            placeholder="Search by name, dept, code, email..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
         <div className="toolbar-right">
-          <button className="btn btn-primary" onClick={openModal}>
+          <button className="btn btn-primary" onClick={openCreateModal}>
             <Plus size={15} /> Register Employee
           </button>
         </div>
       </div>
 
       {loading ? (
-        <div className="empty-state"><div className="loading-spinner" /></div>
+        <div className="empty-state">
+          <div className="loading-spinner" />
+        </div>
       ) : filtered.length === 0 ? (
         <div className="empty-state">
           <Users size={48} className="empty-state-icon" />
-          <div className="empty-state-text">{search ? "No matches found" : "No employees registered"}</div>
-          {!search && <button className="btn btn-primary" onClick={openModal}><Plus size={14} /> Register First Employee</button>}
+          <div className="empty-state-text">
+            {search ? "No matches found" : "No employees registered"}
+          </div>
+          {!search && (
+            <button className="btn btn-primary" onClick={openCreateModal}>
+              <Plus size={14} /> Register First Employee
+            </button>
+          )}
         </div>
       ) : (
-        <div className="employee-grid">
-          {filtered.map(emp => (
-            <div className="employee-card" key={emp.id}>
-              {emp.image_paths && emp.image_paths[0] ? (
-                <img
-                  src={`http://localhost:8000/uploads/${emp.image_paths[0]}`}
-                  alt={emp.name}
-                  className="emp-avatar"
-                  onError={e => { e.target.style.display = "none"; }}
-                />
-              ) : (
-                <div className="emp-avatar-placeholder">{emp.name[0]}</div>
-              )}
-              <div className="emp-name">{emp.name}</div>
-              <div className="emp-dept">{emp.department}</div>
-              <div className="emp-faceid">{emp.face_id}</div>
-              {emp.image_paths && emp.image_paths.length > 0 && (
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
-                  {emp.image_paths.length} face angle{emp.image_paths.length !== 1 ? "s" : ""}
-                </div>
-              )}
-              {emp.email && (
-                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 8 }}>{emp.email}</div>
-              )}
-              <div className="emp-actions">
-                <button className="btn btn-sm btn-danger" onClick={() => remove(emp.id, emp.name)}>
-                  <Trash2 size={12} /> Remove
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="table-wrap employee-table-wrap">
+          <table className="employee-table">
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Department</th>
+                <th>Contact</th>
+                <th>Face ID</th>
+                <th>Photos</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((employee) => (
+                <tr key={employee.id}>
+                  <td>
+                    <div className="employee-person">
+                      {employee.image_paths?.[0] ? (
+                        <img
+                          src={buildImageUrl(employee.image_paths[0])}
+                          alt={employee.name}
+                          className="employee-avatar"
+                          onError={(event) => {
+                            event.currentTarget.style.display = "none";
+                          }}
+                        />
+                      ) : (
+                        <div className="employee-avatar employee-avatar--fallback">
+                          {initials(employee.name)}
+                        </div>
+                      )}
+                      <div>
+                        <div className="employee-name">{employee.name}</div>
+                        <div className="employee-subtitle">{employee.employee_code}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="employee-value">
+                      <Building2 size={14} />
+                      {employee.department || "-"}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="employee-contact">
+                      {employee.email && (
+                        <div className="employee-value">
+                          <Mail size={14} />
+                          {employee.email}
+                        </div>
+                      )}
+                      {employee.phone && (
+                        <div className="employee-value">
+                          <Phone size={14} />
+                          {employee.phone}
+                        </div>
+                      )}
+                      {!employee.email && !employee.phone && <span>-</span>}
+                    </div>
+                  </td>
+                  <td>
+                    <span className="badge badge-green">{employee.face_id}</span>
+                  </td>
+                  <td>
+                    <div className="employee-value">
+                      <ImageIcon size={14} />
+                      {(employee.image_paths || []).length} photo
+                      {(employee.image_paths || []).length === 1 ? "" : "s"}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => openEditModal(employee)}
+                      >
+                        <Pencil size={12} /> Edit
+                      </button>
+                      <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => remove(employee.id, employee.name)}
+                      >
+                        <Trash2 size={12} /> Delete
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {modal && (
-        <div className="modal-backdrop" onClick={() => setModal(false)}>
-          <div className="modal" style={{ maxWidth: 620 }} onClick={e => e.stopPropagation()}>
+      {modalOpen && (
+        <div className="modal-backdrop" onClick={resetDraft}>
+          <div className="modal modal--wide" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <div className="modal-title"><UserCheck size={18} style={{ display: "inline", marginRight: 8 }} />Register Employee</div>
-              <button className="btn btn-icon btn-secondary" onClick={() => setModal(false)}><X size={16} /></button>
+              <div className="modal-title">
+                <Users size={18} style={{ display: "inline", marginRight: 8 }} />
+                {isEditMode ? "Edit Employee" : "Register Employee"}
+              </div>
+              <button className="btn btn-icon btn-secondary" onClick={resetDraft}>
+                <X size={16} />
+              </button>
             </div>
+
             <div className="modal-body">
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <div className="form-group" style={{ gridColumn: "1/-1" }}>
+              <div className="form-grid">
+                <div className="form-group form-group--full">
                   <label className="form-label">Full Name *</label>
-                  <input className="input" placeholder="Rahul Sharma" value={form.name}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+                  <input
+                    className="input"
+                    placeholder="Rahul Sharma"
+                    value={form.name}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, name: event.target.value }))
+                    }
+                  />
                 </div>
+
                 <div className="form-group">
                   <label className="form-label">Employee Code *</label>
-                  <input className="input" placeholder="EMP001" value={form.employee_code}
-                    onChange={e => setForm(f => ({ ...f, employee_code: e.target.value }))} />
+                  <input
+                    className="input"
+                    placeholder="EMP001"
+                    value={form.employee_code}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, employee_code: event.target.value }))
+                    }
+                  />
                 </div>
+
                 <div className="form-group">
                   <label className="form-label">Department *</label>
-                  <select className="select" value={form.department}
-                    onChange={e => setForm(f => ({ ...f, department: e.target.value }))}>
+                  <select
+                    className="select"
+                    value={form.department}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, department: event.target.value }))
+                    }
+                  >
                     <option value="">Select...</option>
-                    {["Engineering", "HR", "Finance", "Operations", "Security", "Management", "IT", "Sales", "Marketing"].map(d => (
-                      <option key={d} value={d}>{d}</option>
+                    {DEPARTMENTS.map((department) => (
+                      <option key={department} value={department}>
+                        {department}
+                      </option>
                     ))}
                   </select>
                 </div>
+
                 <div className="form-group">
                   <label className="form-label">Email</label>
-                  <input className="input" type="email" placeholder="rahul@company.com" value={form.email}
-                    onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
+                  <input
+                    className="input"
+                    type="email"
+                    placeholder="rahul@company.com"
+                    value={form.email}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, email: event.target.value }))
+                    }
+                  />
                 </div>
+
                 <div className="form-group">
                   <label className="form-label">Phone</label>
-                  <input className="input" placeholder="+91 98765 43210" value={form.phone}
-                    onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} />
+                  <input
+                    className="input"
+                    placeholder="+91 98765 43210"
+                    value={form.phone}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, phone: event.target.value }))
+                    }
+                  />
                 </div>
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Face Photos * (multiple angles recommended)</label>
-                <div {...getRootProps()} className={`dropzone ${isDragActive ? "dropzone--active" : ""}`}>
-                  <input {...getInputProps()} />
-                  <div className="dropzone-icon"><Upload size={28} /></div>
-                  <div className="dropzone-text">Drop face photos here, or click to browse</div>
-                  <div className="dropzone-sub">JPG, PNG, WEBP · Upload from different angles for better accuracy</div>
+              {isEditMode && existingPhotos.length > 0 && (
+                <div className="photo-summary">
+                  <div className="form-label">Current Face Photos</div>
+                  <div className="img-preview-grid">
+                    {existingPhotos.map((path) => (
+                      <img
+                        key={path}
+                        src={buildImageUrl(path)}
+                        alt="Current face"
+                        className="img-preview"
+                      />
+                    ))}
+                  </div>
+                  <div className="helper-text">
+                    Uploading new photos will replace the current face set.
+                  </div>
                 </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">
+                  {isEditMode ? "Replace Face Photos" : "Face Photos *"}
+                </label>
+                <div
+                  {...getRootProps()}
+                  className={`dropzone ${isDragActive ? "dropzone--active" : ""}`}
+                >
+                  <input {...getInputProps()} />
+                  <div className="dropzone-icon">
+                    <Upload size={28} />
+                  </div>
+                  <div className="dropzone-text">
+                    Drop face photos here, or click to browse
+                  </div>
+                  <div className="dropzone-sub">
+                    JPG, PNG, WEBP. Upload multiple angles for better recognition.
+                  </div>
+                </div>
+
                 {previews.length > 0 && (
                   <div className="img-preview-grid">
-                    {previews.map((src, i) => (
-                      <div key={i} style={{ position: "relative" }}>
+                    {previews.map((src, index) => (
+                      <div key={src} className="preview-tile">
                         <img src={src} alt="" className="img-preview" />
                         <button
-                          onClick={() => removeFile(i)}
-                          style={{
-                            position: "absolute", top: -6, right: -6,
-                            width: 18, height: 18, borderRadius: "50%",
-                            background: "var(--red)", border: "none",
-                            color: "#fff", cursor: "pointer", fontSize: 10,
-                            display: "flex", alignItems: "center", justifyContent: "center"
-                          }}
-                        ><X size={10} /></button>
+                          type="button"
+                          onClick={() => removeFile(index)}
+                          className="preview-remove"
+                        >
+                          <X size={10} />
+                        </button>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
 
-              <div style={{
-                background: "var(--accent-dim)", border: "1px solid rgba(0,229,160,0.2)",
-                borderRadius: "var(--radius)", padding: "10px 14px",
-                fontSize: 12, color: "var(--text-secondary)", fontFamily: "var(--font-mono)"
-              }}>
-                💡 Face ID will be auto-generated as <strong style={{ color: "var(--accent)" }}>EMP-{(form.employee_code || "XXX").toUpperCase()}</strong>.
-                Upload photos from multiple angles (front, left, right) for best recognition accuracy.
+              <div className="info-panel">
+                Face ID is generated from the employee code as{" "}
+                <strong>EMP-{(form.employee_code || "XXX").toUpperCase()}</strong>.
               </div>
             </div>
+
             <div className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => setModal(false)}>Cancel</button>
+              <button className="btn btn-secondary" onClick={resetDraft}>
+                Cancel
+              </button>
               <button className="btn btn-primary" onClick={save} disabled={saving}>
-                {saving ? "Processing..." : "Register Employee"}
+                {saving
+                  ? "Processing..."
+                  : isEditMode
+                  ? "Update Employee"
+                  : "Register Employee"}
               </button>
             </div>
           </div>

@@ -21,12 +21,13 @@ import numpy as np
 log = logging.getLogger("faceguard.engine")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-COSINE_THRESHOLD = 0.45      # lower threshold works better with aligned embeddings
+COSINE_THRESHOLD = 0.40      # Lowered: matches are sensitive to alignment/backend differences
 VOTE_WINDOW = 8              # frames in vote buffer
 VOTE_THRESHOLD = 3           # votes needed to confirm name (faster recognition)
 MIN_FACE_SIZE = 40           # CCTV faces can be small
 MAX_BLUR_VAR = 20.0          # CCTV footage is often compressed/blurry
 EMBED_DIM = 512              # ArcFace embedding dimension
+DEBUG_MATCHING = True        # Log cosine similarity scores for diagnosis
 
 
 class FaceEngine:
@@ -102,6 +103,7 @@ class FaceEngine:
                 "name": name,
                 "embedding": np.array(embedding, dtype=np.float32),
             }
+            log.info(f"✅ Registered face: {name} ({face_id}) — emb norm={np.linalg.norm(np.array(embedding)):.3f}")
 
     def update_face(self, emp_id: str, embedding: list):
         with self._lock:
@@ -121,7 +123,7 @@ class FaceEngine:
         for row in rows:
             emb = json.loads(row["embedding"])
             self.register_face(row["id"], row["face_id"], row["name"], emb)
-        log.info(f"Loaded {len(rows)} face embeddings from DB")
+        log.info(f"✅ Loaded {len(rows)} employee embeddings from database")
 
     # ── Embedding Extraction ───────────────────────────────────────────────────
 
@@ -164,7 +166,8 @@ class FaceEngine:
             try:
                 result = self._deepface.represent(
                     img, model_name="ArcFace",
-                    enforce_detection=False, detector_backend="skip",
+                    enforce_detection=True,  # MUST detect & align for consistency with registration
+                    detector_backend="retinaface",
                 )
                 if not result:
                     return None
@@ -172,7 +175,7 @@ class FaceEngine:
                 norm = np.linalg.norm(emb)
                 return emb / norm if norm > 0 else emb
             except Exception as e:
-                log.error(f"DeepFace embedding error: {e}")
+                log.debug(f"DeepFace embedding error (detection enforced): {e}")
                 return None
 
         return self._mock_embedding()
@@ -194,10 +197,12 @@ class FaceEngine:
         Returns: {annotated_frame, detections}
         """
         if not self._initialized:
+            log.warning("Face engine not initialized!")
             return {"annotated_frame": frame, "detections": []}
 
         annotated  = frame.copy()
         detections = []
+        frame_faces_found = 0
 
         # ── Fast path: InsightFace ONNX does detection+alignment+embedding ────
         if self._embed_backend == "insightface_onnx" and self._insight_onnx is not None:
@@ -226,22 +231,25 @@ class FaceEngine:
 
                 self._vote_buffers[track_id].append(match_id)
                 stable_id = self._get_stable_id(track_id)
+                resolved_id = stable_id or match_id
 
-                # Only annotate & report REGISTERED employees — skip unknowns
-                if not (stable_id and stable_id in self._registry):
+                # Show registered employees as soon as we have a valid cosine match,
+                # then let the vote buffer confirm the identity on subsequent frames.
+                if not (resolved_id and resolved_id in self._registry):
                     continue
 
-                entry = self._registry[stable_id]
+                entry = self._registry[resolved_id]
                 label = f"{entry['name']} [{entry['face_id']}]"
                 self._draw_detection(annotated, x1, y1, x2, y2, label, (0, 220, 100), match_conf)
                 detections.append({
                     "track_id":    track_id,
-                    "employee_id": stable_id,
+                    "employee_id": resolved_id,
                     "face_id":     entry["face_id"],
                     "name":        entry["name"],
                     "confidence":  round(float(match_conf), 3),
                     "bbox":        [x1, y1, x2, y2],
                     "recognized":  True,
+                    "confirmed":   stable_id is not None,
                 })
 
             return {"annotated_frame": annotated, "detections": detections}
@@ -263,9 +271,10 @@ class FaceEngine:
             match_id, match_name, match_conf = self._identify(face_crop)
             self._vote_buffers[track_id].append(match_id)
             stable_id = self._get_stable_id(track_id)
+            resolved_id = stable_id or match_id
 
-            if stable_id and stable_id in self._registry:
-                entry = self._registry[stable_id]
+            if resolved_id and resolved_id in self._registry:
+                entry = self._registry[resolved_id]
                 label = f"{entry['name']} [{entry['face_id']}]"
                 color = (0, 220, 100)
                 conf_display = match_conf
@@ -277,12 +286,13 @@ class FaceEngine:
             self._draw_detection(annotated, x1, y1, x2, y2, label, color, conf_display)
             detections.append({
                 "track_id":    track_id,
-                "employee_id": stable_id,
-                "face_id":     self._registry[stable_id]["face_id"] if stable_id and stable_id in self._registry else None,
-                "name":        self._registry[stable_id]["name"] if stable_id and stable_id in self._registry else "Unknown",
+                "employee_id": resolved_id,
+                "face_id":     self._registry[resolved_id]["face_id"] if resolved_id and resolved_id in self._registry else None,
+                "name":        self._registry[resolved_id]["name"] if resolved_id and resolved_id in self._registry else "Unknown",
                 "confidence":  round(float(conf_display), 3),
                 "bbox":        [x1, y1, x2, y2],
-                "recognized":  stable_id is not None,
+                "recognized":  resolved_id is not None,
+                "confirmed":   stable_id is not None,
             })
 
         return {"annotated_frame": annotated, "detections": detections}
@@ -353,6 +363,11 @@ class FaceEngine:
                     best_score = score
                     best_id = emp_id
                     best_name = data["name"]
+
+        # Debug logging for diagnosis
+        if DEBUG_MATCHING and best_score > 0.25:
+            match_status = "✅ MATCHED" if best_score >= COSINE_THRESHOLD else "⚠️  BELOW_THRESHOLD"
+            log.debug(f"Cosine match: {best_name} = {best_score:.4f} ({match_status}, threshold={COSINE_THRESHOLD})")
 
         if best_score >= COSINE_THRESHOLD:
             return best_id, best_name, best_score
