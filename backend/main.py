@@ -1,6 +1,6 @@
 """
 FaceGuard Pro - Production CCTV Face Recognition System
-Backend: FastAPI + YOLOv8 + ArcFace (InsightFace ResNet-100) + DeepSORT
+Backend: FastAPI + YOLO11 + ArcFace (InsightFace ResNet-100) + DeepSORT
 """
 
 import asyncio
@@ -10,6 +10,9 @@ import logging
 import os
 import time
 import uuid
+
+# Fix for OMP: Error #15 - Multiple OpenMP runtimes linked
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from contextlib import asynccontextmanager
 from importlib import metadata
 from pathlib import Path
@@ -27,7 +30,7 @@ from face_engine import FaceEngine
 from camera_manager import CameraManager
 from models import (
     CameraCreate, CameraUpdate, EmployeeCreate, EmployeeUpdate,
-    Camera, Employee, DetectionEvent
+    Camera, Employee, DetectionEvent, ObjectDetection
 )
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -62,9 +65,11 @@ async def lifespan(app: FastAPI):
             log.warning(f"Could not auto-start camera {cam['id']}: {e}")
 
     log.info("✅ All systems ready")
-    yield
-    log.info("🛑 Shutting down FaceGuard Pro...")
-    camera_manager.stop_all()
+    try:
+        yield
+    finally:
+        log.info("🛑 Shutting down FaceGuard Pro...")
+        camera_manager.stop_all()
 
 
 app = FastAPI(
@@ -322,12 +327,14 @@ async def dashboard_stats():
     active_cams = sum(1 for c in cameras if camera_manager.is_active(c["id"]))
     events_today = db.get_events_today()
     unique_today = db.get_unique_detections_today()
+    objects_today = db.get_objects_today()
     return {
         "total_cameras": len(cameras),
         "active_cameras": active_cams,
         "total_employees": len(employees),
         "events_today": events_today,
         "unique_detections_today": unique_today,
+        "objects_today": objects_today,
         "registered_faces": face_engine.face_count(),
     }
 
@@ -335,6 +342,15 @@ async def dashboard_stats():
 @app.get("/api/events")
 async def list_events(limit: int = 100, camera_id: Optional[str] = None):
     return db.get_events(limit=limit, camera_id=camera_id)
+
+
+@app.get("/api/object-detections", response_model=list[ObjectDetection])
+async def list_object_detections(
+    limit: int = 100,
+    camera_id: Optional[str] = None,
+    employee_id: Optional[str] = None,
+):
+    return db.get_object_detections(limit=limit, camera_id=camera_id, employee_id=employee_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -492,6 +508,3 @@ def _ensure_numpy_opencv_compat() -> None:
 
 
 _ensure_numpy_opencv_compat()
-
-import cv2
-import numpy as np

@@ -6,8 +6,9 @@ import Cameras from "./pages/Cameras";
 import Employees from "./pages/Employees";
 import LiveFeed from "./pages/LiveFeed";
 import Events from "./pages/Events";
+import Objects from "./pages/Objects";
 import {
-  LayoutDashboard, Camera, Users, MonitorPlay, Activity, Shield
+  LayoutDashboard, Camera, Users, MonitorPlay, Activity, Shield, PackageSearch
 } from "lucide-react";
 import "./index.css";
 
@@ -16,6 +17,7 @@ const NAV = [
   { to: "/cameras",   label: "Cameras",    icon: Camera          },
   { to: "/employees", label: "Employees",  icon: Users           },
   { to: "/live",      label: "Live Feed",  icon: MonitorPlay     },
+  { to: "/objects",   label: "Objects",    icon: PackageSearch   },
   { to: "/events",    label: "Events",     icon: Activity        },
 ];
 
@@ -64,6 +66,7 @@ export default function App() {
             <Route path="/cameras"   element={<Cameras />}   />
             <Route path="/employees" element={<Employees />} />
             <Route path="/live"      element={<LiveFeed />}  />
+            <Route path="/objects"   element={<Objects />}   />
             <Route path="/events"    element={<Events />}    />
           </Routes>
         </main>

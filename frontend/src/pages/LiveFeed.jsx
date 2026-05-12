@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { getCameras, createCameraWS, createEventsWS } from "../api";
-import { MonitorPlay, Wifi, WifiOff, Activity, User } from "lucide-react";
+import { MonitorPlay, Wifi, WifiOff, Activity, User, X } from "lucide-react";
 import { format, fromUnixTime } from "date-fns";
 
 export default function LiveFeed() {
@@ -8,6 +8,7 @@ export default function LiveFeed() {
   const [frames, setFrames]               = useState({});
   const [cameraDetections, setCameraDetections] = useState({});
   const [events, setEvents]               = useState([]);
+  const [focusedCam, setFocusedCam]       = useState(null);
   const wsRefs      = useRef({});
   const reconnectTs = useRef({});   // cam_id → timestamp of last reconnect attempt
   const eventsWsRef = useRef(null);
@@ -108,6 +109,7 @@ export default function LiveFeed() {
                 cam={cam}
                 frame={frames[cam.id]}
                 detections={cameraDetections[cam.id] || []}
+                onFocus={() => setFocusedCam(cam.id)}
               />
             ))
           )}
@@ -162,11 +164,20 @@ export default function LiveFeed() {
           </div>
         </div>
       </div>
+
+      {focusedCam && (
+        <FullscreenOverlay
+          cam={cameras.find(c => c.id === focusedCam)}
+          frame={frames[focusedCam]}
+          detections={cameraDetections[focusedCam] || []}
+          onClose={() => setFocusedCam(null)}
+        />
+      )}
     </div>
   );
 }
 
-function CameraView({ cam, frame, detections }) {
+function CameraView({ cam, frame, detections, onFocus }) {
   const imgRef    = useRef(null);
   const [imgSize, setImgSize] = useState({ w: 1, h: 1 }); // natural size of streamed frame
   const online = !!frame;
@@ -177,7 +188,7 @@ function CameraView({ cam, frame, detections }) {
   }
 
   return (
-    <div className="live-camera-card">
+    <div className="live-camera-card" onClick={onFocus}>
       <div className="live-camera-header">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div className={`live-dot ${online ? "live-dot--online" : ""}`} />
@@ -185,7 +196,7 @@ function CameraView({ cam, frame, detections }) {
         </div>
         <div style={{ display: "flex", align: "center", gap: 8 }}>
           {detections.length > 0 && (
-            <span className="badge badge-green">{detections.length} face{detections.length !== 1 ? "s" : ""}</span>
+            <span className="badge badge-green">{detections.length} targets</span>
           )}
           {online
             ? <Wifi size={14} color="var(--accent)" />
@@ -221,7 +232,7 @@ function CameraView({ cam, frame, detections }) {
         )}
 
         {/* Detection overlays — use actual frame resolution for correct scaling */}
-        {detections.map((det, i) => (
+        {detections.filter(det => det.recognized || det.kind === "object").map((det, i) => (
           <div
             key={i}
             style={{
@@ -230,7 +241,7 @@ function CameraView({ cam, frame, detections }) {
               top:    `${(det.bbox[1] / imgSize.h) * 100}%`,
               width:  `${((det.bbox[2] - det.bbox[0]) / imgSize.w) * 100}%`,
               height: `${((det.bbox[3] - det.bbox[1]) / imgSize.h) * 100}%`,
-              border: `2px solid ${det.recognized ? "var(--accent)" : "rgba(220,60,60,0.85)"}`,
+              border: `2px solid ${det.kind === "object" ? "#ffb020" : det.recognized ? "var(--accent)" : "rgba(220,60,60,0.85)"}`,
               pointerEvents: "none",
               boxSizing: "border-box",
             }}
@@ -239,15 +250,17 @@ function CameraView({ cam, frame, detections }) {
               position: "absolute",
               bottom: "100%",
               left: 0,
-              background: det.recognized ? "var(--accent)" : "rgba(220,60,60,0.92)",
-              color: det.recognized ? "#060d14" : "#fff",
+              background: det.kind === "object" ? "#ffb020" : det.recognized ? "var(--accent)" : "rgba(220,60,60,0.92)",
+              color: det.kind === "object" ? "#09111a" : det.recognized ? "#060d14" : "#fff",
               fontSize: 10,
               padding: "1px 6px",
               fontFamily: "var(--font-mono)",
               whiteSpace: "nowrap",
               fontWeight: 600,
             }}>
-              {det.name} {det.face_id && `[${det.face_id}]`}
+              {det.kind === "object"
+                ? `${det.label || "object"} ${det.object_id ? `[${det.object_id}]` : ""}`
+                : `${det.employee_name || det.name || "Unknown"} ${det.face_id ? `[${det.face_id}]` : ""}`}
             </div>
           </div>
         ))}
@@ -264,6 +277,91 @@ function CameraView({ cam, frame, detections }) {
           📍 {cam.location}
         </div>
       )}
+    </div>
+  );
+}
+
+function FullscreenOverlay({ cam, frame, detections, onClose }) {
+  const [imgSize, setImgSize] = useState({ w: 1, h: 1 });
+  const online = !!frame;
+
+  return (
+    <div className="camera-fullscreen-backdrop">
+      <div className="camera-fullscreen-header">
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div className={`live-dot ${online ? "live-dot--online" : ""}`} style={{ width: 12, height: 12 }} />
+          <div>
+            <div className="page-title" style={{ fontSize: 20 }}>{cam?.name || "Camera Stream"}</div>
+            <div className="page-sub">{cam?.location || "Live View"}</div>
+          </div>
+        </div>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          {detections.length > 0 && (
+            <span className="badge badge-green" style={{ padding: "6px 14px", fontSize: 13 }}>
+              {detections.length} Targets Detected
+            </span>
+          )}
+          <button className="close-fullscreen" onClick={onClose} title="Close Fullscreen">
+            <span style={{ fontSize: 11, fontWeight: 700, marginRight: 8, letterSpacing: 1 }}>EXIT</span>
+            <X size={20} />
+          </button>
+        </div>
+      </div>
+
+      <div className="camera-fullscreen-body" onClick={onClose}>
+        <div className="camera-fullscreen-content" onClick={e => e.stopPropagation()}>
+          {frame ? (
+            <>
+              <img
+                src={`data:image/jpeg;base64,${frame}`}
+                alt=""
+                className="camera-fullscreen-img"
+                onLoad={e => setImgSize({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+              />
+              {/* Overlays */}
+              {detections.filter(det => det.recognized || det.kind === "object").map((det, i) => (
+                <div
+                  key={i}
+                  style={{
+                    position: "absolute",
+                    left:   `${(det.bbox[0] / imgSize.w) * 100}%`,
+                    top:    `${(det.bbox[1] / imgSize.h) * 100}%`,
+                    width:  `${((det.bbox[2] - det.bbox[0]) / imgSize.w) * 100}%`,
+                    height: `${((det.bbox[3] - det.bbox[1]) / imgSize.h) * 100}%`,
+                    border: `3px solid ${det.kind === "object" ? "#ffb020" : det.recognized ? "var(--accent)" : "rgba(220,60,60,0.85)"}`,
+                    pointerEvents: "none",
+                    boxSizing: "border-box",
+                    boxShadow: "0 0 10px rgba(0,0,0,0.5)",
+                  }}
+                >
+                  <div style={{
+                    position: "absolute",
+                    bottom: "100%",
+                    left: 0,
+                    background: det.kind === "object" ? "#ffb020" : det.recognized ? "var(--accent)" : "rgba(220,60,60,0.92)",
+                    color: det.kind === "object" ? "#09111a" : det.recognized ? "#060d14" : "#fff",
+                    fontSize: 12,
+                    padding: "2px 8px",
+                    fontFamily: "var(--font-mono)",
+                    whiteSpace: "nowrap",
+                    fontWeight: 700,
+                  }}>
+                    {det.kind === "object"
+                      ? `${det.label || "object"} ${det.object_id ? `[${det.object_id}]` : ""}`
+                      : `${det.employee_name || det.name || "Unknown"} ${det.face_id ? `[${det.face_id}]` : ""}`}
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : (
+            <div className="camera-feed-offline" style={{ padding: 40 }}>
+              <div className="loading-spinner" style={{ width: 40, height: 40 }} />
+              <div style={{ marginTop: 12 }}>Reconnecting to stream...</div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

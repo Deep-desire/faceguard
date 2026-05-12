@@ -26,6 +26,12 @@ export const getEvents = (limit = 100, camera_id) => {
   if (camera_id) params.camera_id = camera_id;
   return API.get("/events", { params }).then(r => r.data);
 };
+export const getObjectDetections = (limit = 100, camera_id, employee_id) => {
+  const params = { limit };
+  if (camera_id) params.camera_id = camera_id;
+  if (employee_id) params.employee_id = employee_id;
+  return API.get("/object-detections", { params }).then(r => r.data);
+};
 
 // ── WebSocket helpers ──────────────────────────────────────────────────────
 export const WS_BASE = "ws://localhost:8000";

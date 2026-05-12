@@ -1,6 +1,6 @@
 """
 FaceGuard Pro - Database Layer (SQLite via sqlite3)
-Handles cameras, employees, and detection events.
+Handles cameras, employees, detection events, and object detections.
 """
 
 import json
@@ -63,7 +63,30 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_events_ts   ON detection_events(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_events_cam  ON detection_events(camera_id);
                 CREATE INDEX IF NOT EXISTS idx_events_face ON detection_events(face_id);
+
+                CREATE TABLE IF NOT EXISTS object_detections (
+                    object_id        TEXT PRIMARY KEY,
+                    camera_id        TEXT NOT NULL,
+                    employee_id      TEXT,
+                    employee_name    TEXT,
+                    object_label     TEXT NOT NULL,
+                    confidence       REAL,
+                    track_id         TEXT,
+                    snapshot_path    TEXT,
+                    bbox             TEXT,
+                    appearance_hash  TEXT,
+                    first_seen       REAL,
+                    last_seen        REAL,
+                    occurrence_count INTEGER DEFAULT 1,
+                    FOREIGN KEY (camera_id) REFERENCES cameras(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_objects_last_seen ON object_detections(last_seen);
+                CREATE INDEX IF NOT EXISTS idx_objects_cam       ON object_detections(camera_id);
+                CREATE INDEX IF NOT EXISTS idx_objects_employee  ON object_detections(employee_id);
             """)
+
+            self._ensure_column("object_detections", "appearance_hash", "TEXT")
 
     # ── Cameras ────────────────────────────────────────────────────────────────
 
@@ -184,9 +207,142 @@ class Database:
             ).fetchone()
             return row[0]
 
+    # ── Object Detections ─────────────────────────────────────────────────────
+
+    def insert_object_detection(self, obj: dict):
+        self.upsert_object_detection(obj)
+
+    def upsert_object_detection(self, obj: dict):
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO object_detections
+                   (object_id,camera_id,employee_id,employee_name,object_label,confidence,track_id,snapshot_path,bbox,appearance_hash,first_seen,last_seen,occurrence_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(object_id) DO UPDATE SET
+                       camera_id=excluded.camera_id,
+                       employee_id=excluded.employee_id,
+                       employee_name=excluded.employee_name,
+                       object_label=excluded.object_label,
+                       confidence=excluded.confidence,
+                       track_id=excluded.track_id,
+                       snapshot_path=excluded.snapshot_path,
+                       bbox=excluded.bbox,
+                       appearance_hash=excluded.appearance_hash,
+                       first_seen=MIN(object_detections.first_seen, excluded.first_seen),
+                       last_seen=excluded.last_seen,
+                       occurrence_count=excluded.occurrence_count""",
+                (
+                    obj["object_id"],
+                    obj["camera_id"],
+                    obj.get("employee_id"),
+                    obj.get("employee_name"),
+                    obj["object_label"],
+                    obj.get("confidence"),
+                    obj.get("track_id"),
+                    obj.get("snapshot_path"),
+                    json.dumps(obj.get("bbox")) if obj.get("bbox") is not None else None,
+                    obj.get("appearance_hash"),
+                    obj.get("first_seen"),
+                    obj.get("last_seen"),
+                    obj.get("occurrence_count", 1),
+                ),
+            )
+
+    def get_object_detection(self, object_id: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM object_detections WHERE object_id=?", (object_id,)).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["bbox"] = json.loads(data["bbox"]) if data.get("bbox") else None
+            return data
+
+    def find_recent_object_match(
+        self,
+        object_label: str,
+        appearance_hash: str,
+        camera_id: Optional[str] = None,
+        employee_id: Optional[str] = None,
+        max_age_seconds: int = 900,
+        max_hamming_distance: int = 8,
+    ) -> Optional[dict]:
+        cutoff = time.time() - max_age_seconds
+        query = "SELECT * FROM object_detections WHERE object_label=? AND last_seen >= ?"
+        params: list = [object_label, cutoff]
+
+        if camera_id:
+            query += " AND camera_id=?"
+            params.append(camera_id)
+        if employee_id:
+            query += " AND employee_id=?"
+            params.append(employee_id)
+
+        query += " ORDER BY last_seen DESC"
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            for row in rows:
+                candidate = dict(row)
+                candidate_hash = candidate.get("appearance_hash")
+                if candidate_hash and self._hash_distance(candidate_hash, appearance_hash) <= max_hamming_distance:
+                    candidate["bbox"] = json.loads(candidate["bbox"]) if candidate.get("bbox") else None
+                    return candidate
+        return None
+
+    def get_object_detections(
+        self,
+        limit: int = 100,
+        camera_id: Optional[str] = None,
+        employee_id: Optional[str] = None,
+    ) -> list[dict]:
+        query = "SELECT * FROM object_detections"
+        params: list = []
+        clauses = []
+
+        if camera_id:
+            clauses.append("camera_id=?")
+            params.append(camera_id)
+        if employee_id:
+            clauses.append("employee_id=?")
+            params.append(employee_id)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+
+        query += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            detections = [dict(r) for r in rows]
+            for detection in detections:
+                detection["bbox"] = json.loads(detection["bbox"]) if detection.get("bbox") else None
+            return detections
+
+    def get_objects_today(self) -> int:
+        start = time.time() - 86400
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM object_detections WHERE last_seen >= ?",
+                (start,),
+            ).fetchone()
+            return row[0]
+
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _fmt_emp(self, emp: dict) -> dict:
         emp["image_paths"] = json.loads(emp.get("image_paths") or "[]")
         emp.pop("embedding", None)
         return emp
+
+    def _ensure_column(self, table: str, column: str, definition: str):
+        with self._conn() as conn:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _hash_distance(self, hash_a: str, hash_b: str) -> int:
+        try:
+            return int(bin(int(hash_a, 16) ^ int(hash_b, 16)).count("1"))
+        except Exception:
+            return 999

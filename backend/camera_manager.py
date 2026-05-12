@@ -11,7 +11,7 @@ Architecture — 3 fully-decoupled stages:
 
   Stage-2  ai_thread       : Wakes at AI_INTERVAL seconds.
                               Grabs latest raw frame (copy, no blocking).
-                              Runs YOLOv8 + ArcFace in the background thread.
+                              Runs YOLO11 + ArcFace in the background thread.
                               Writes annotated frame + detections atomically.
 
   Stage-3  frame_generator : Async generator called from WebSocket handler.
@@ -41,6 +41,8 @@ from typing import AsyncGenerator, Optional
 
 import cv2
 import numpy as np
+
+from object_detector import OpenVocabularyObjectDetector
 
 log = logging.getLogger("faceguard.cameras")
 
@@ -73,9 +75,38 @@ def _make_rtsp_url(url: str) -> str:
     # If it's not an RTSP stream (e.g. local webcam index), return as-is
     if not url.lower().startswith("rtsp"):
         return url
+    # Percent-encode username/password if they contain special characters
+    try:
+        from urllib.parse import quote
+
+        scheme, rest = url.split("://", 1)
+        # split authority and path
+        if "/" in rest:
+            authority, path = rest.split("/", 1)
+            path = "/" + path
+        else:
+            authority, path = rest, ""
+
+        if "@" in authority:
+            # split at the last '@' to allow '@' in password
+            idx = authority.rfind("@")
+            userinfo = authority[:idx]
+            hostport = authority[idx + 1 :]
+            if ":" in userinfo:
+                user, pwd = userinfo.split(":", 1)
+            else:
+                user, pwd = userinfo, ""
+            user_enc = quote(user, safe="")
+            pwd_enc = quote(pwd, safe="") if pwd else ""
+            authority = f"{user_enc}:{pwd_enc}@{hostport}" if pwd_enc else f"{user_enc}@{hostport}"
+
+        rebuilt = f"{scheme}://{authority}{path}"
+    except Exception:
+        rebuilt = url
+
     opts = "&".join(f"{k}={v}" for k, v in _RTSP_OPTIONS.items())
-    sep  = "&" if "?" in url else "?"
-    return f"{url}{sep}{opts}"
+    sep = "&" if "?" in rebuilt else "?"
+    return f"{rebuilt}{sep}{opts}"
 
 
 class CameraWorker:
@@ -84,11 +115,12 @@ class CameraWorker:
     accessors for the async WebSocket generator.
     """
 
-    def __init__(self, cam_id: str, rtsp_url: str, face_engine, db):
+    def __init__(self, cam_id: str, rtsp_url: str, face_engine, db, object_detector=None):
         self.cam_id      = cam_id
         self.rtsp_url    = rtsp_url
         self.face_engine = face_engine
         self.db          = db
+        self.object_detector = object_detector
 
         self._stop       = threading.Event()
         self._raw_lock   = threading.Lock()
@@ -280,7 +312,13 @@ class CameraWorker:
             try:
                 result     = self.face_engine.process_frame(frame, self.cam_id)
                 annotated  = result["annotated_frame"]
-                detections = result["detections"]
+                detections = [{**det, "kind": "face"} for det in result["detections"]]
+
+                if self.object_detector is not None:
+                    persons, objects = self.object_detector.detect(frame, self.cam_id, result["detections"])
+                    annotated = self.object_detector.draw_detections(annotated, persons, objects)
+                    detections.extend(persons)
+                    detections.extend(objects)
 
                 with self._out_lock:
                     self._out_frame  = annotated
@@ -364,7 +402,7 @@ class CameraWorker:
                 "camera_id":     self.cam_id,
                 "employee_id":   det.get("employee_id"),
                 "face_id":       det.get("face_id"),
-                "employee_name": det.get("name"),
+                "employee_name": det.get("name") or det.get("employee_name"),
                 "confidence":    det.get("confidence"),
                 "track_id":      det.get("track_id"),
                 "timestamp":     time.time(),
@@ -406,7 +444,7 @@ class CameraManager:
         with self._lock:
             if cam_id in self._workers:
                 self._workers[cam_id].stop()
-            worker = CameraWorker(cam_id, rtsp_url, self._face_engine, self._db)
+            worker = CameraWorker(cam_id, rtsp_url, self._face_engine, self._db, OpenVocabularyObjectDetector(self._db))
             self._workers[cam_id] = worker
             log.info(f"Camera {cam_id[:8]} started")
 

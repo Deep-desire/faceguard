@@ -1,7 +1,8 @@
 # FaceGuard Pro 🛡️
 ### Production CCTV Face Recognition System
 
-Real-time face detection and recognition system for CCTV surveillance using YOLOv8, ArcFace (InsightFace ResNet-100), and DeepSORT tracking.
+Real-time face detection and recognition system for CCTV surveillance using YOLO11, ArcFace (InsightFace ResNet-100), and DeepSORT tracking.
+The current build also adds a carried-object detection pipeline with stable object IDs, persisted snapshots, and an object inventory page.
 
 ---
 
@@ -47,6 +48,10 @@ Cosine similarity ≥ 0.55 (NOT Euclidean)
 Temporal vote buffer (NEW): Name shown after 5/10 frame votes
      ↓
 Person track ID (NEW): DeepSORT bounding box track
+     ↓
+Object branch (NEW): YOLO-World / YOLO object detector + stable object IDs
+     ↓
+Employee-object association (NEW): links carried objects to the matched employee
 ```
 
 ---
@@ -72,7 +77,7 @@ source venv/bin/activate        # Linux/Mac
 # Install dependencies
 pip install -r requirements.txt
 
-# Download YOLOv8 face model (auto-downloads on first run)
+# Download YOLO11 face model (auto-downloads on first run)
 # InsightFace models are optional; if installed, they auto-download on first run (~500MB)
 
 # Start the server
@@ -145,9 +150,15 @@ rtsp://admin:admin@192.168.0.100/live.sdp
 - Active camera streams appear automatically
 - Recognized employees are highlighted with **green bounding boxes + name + Face ID**
 - Unknown faces highlighted with **blue bounding boxes**
+- Detected objects are highlighted with **orange bounding boxes + stable OBJ-IDs**
 - Right panel shows real-time detection events
 
-### 4. View History
+### 4. Review Objects
+- Go to **Objects** tab
+- Review persisted object snapshots, object IDs, linked employees, and detection counts
+- Each object track is stored under `uploads/objects/` and reused while the track remains active
+
+### 5. View History
 - Go to **Events** tab
 - Filter by camera or recognition status
 - View face snapshots, confidence scores, timestamps
@@ -177,6 +188,7 @@ DELETE /api/employees/{id}       # Remove employee
 ```
 GET    /api/events               # Detection history
 GET    /api/dashboard/stats      # Dashboard statistics
+GET    /api/object-detections    # Persisted object tracks and snapshots
 ```
 
 ### WebSocket

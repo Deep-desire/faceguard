@@ -1,6 +1,6 @@
 """
 FaceGuard Pro - Face Engine
-Pipeline: YOLOv8 (face detection) → Quality Gate → ArcFace (embedding) → Cosine Similarity
+Pipeline: YOLO11 (face detection) → Quality Gate → ArcFace (embedding) → Cosine Similarity
 Temporal Vote Buffer for stable recognition → DeepSORT for track IDs
 
 Embedding backend priority:
@@ -17,6 +17,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import faiss
 
 log = logging.getLogger("faceguard.engine")
 
@@ -52,18 +53,22 @@ class FaceEngine:
         self._face_app     = None  # InsightFace Python pkg (legacy)
         self._deepface     = None  # DeepFace ArcFace (secondary fallback)
         self._embed_backend = "mock"  # set during initialize()
+        
+        # FAISS Index
+        self._faiss_index = None
+        self._faiss_map = []  # mapping index -> emp_id
 
     # ── Initialization ─────────────────────────────────────────────────────────
 
     def initialize(self):
-        """Load YOLOv8 and InsightFace models."""
+        """Load YOLO11 and InsightFace models."""
         try:
             from ultralytics import YOLO
-            # YOLOv8n-face - lightweight face detection model
-            self._yolo = YOLO("yolov8n-face.pt")
-            log.info("✅ YOLOv8 face model loaded")
+            # YOLO11n - standard model (auto-downloads)
+            self._yolo = YOLO("yolo11n.pt")
+            log.info("✅ YOLO11 face model loaded")
         except Exception as e:
-            log.warning(f"YOLOv8 load failed: {e}. Using OpenCV fallback.")
+            log.warning(f"YOLO11 load failed: {e}. Using OpenCV fallback.")
             self._yolo = None
 
         # ── InsightFace ONNX (primary — no MSVC required) ──────────────────────
@@ -103,6 +108,7 @@ class FaceEngine:
                 "name": name,
                 "embedding": np.array(embedding, dtype=np.float32),
             }
+            self._rebuild_faiss_index()
             log.info(f"✅ Registered face: {name} ({face_id}) — emb norm={np.linalg.norm(np.array(embedding)):.3f}")
 
     def update_face(self, emp_id: str, embedding: list):
@@ -112,17 +118,53 @@ class FaceEngine:
 
     def remove_face(self, emp_id: str):
         with self._lock:
-            self._registry.pop(emp_id, None)
+            if emp_id in self._registry:
+                self._registry.pop(emp_id)
+                self._rebuild_faiss_index()
 
     def face_count(self) -> int:
         return len(self._registry)
 
+    def _rebuild_faiss_index(self):
+        """Rebuild the FAISS index whenever the registry changes."""
+        if not self._registry:
+            self._faiss_index = None
+            self._faiss_map = []
+            return
+
+        embeddings = []
+        self._faiss_map = []
+        for emp_id, data in self._registry.items():
+            emb = data["embedding"]
+            # Ensure normalization for cosine similarity via Inner Product
+            norm = np.linalg.norm(emb)
+            if norm > 1e-6:
+                emb = emb / norm
+            embeddings.append(emb)
+            self._faiss_map.append(emp_id)
+
+        embeddings_np = np.stack(embeddings).astype('float32')
+        d = embeddings_np.shape[1]
+        
+        # IndexFlatIP = Flat index with Inner Product (equivalent to Cosine Sim on normalized vectors)
+        index = faiss.IndexFlatIP(d)
+        index.add(embeddings_np)
+        self._faiss_index = index
+        log.info(f"⚡ FAISS index rebuilt with {len(self._faiss_map)} vectors")
+
     def load_from_db(self, db):
         """Reload all embeddings from DB on startup."""
         rows = db.get_all_embeddings()
-        for row in rows:
-            emb = json.loads(row["embedding"])
-            self.register_face(row["id"], row["face_id"], row["name"], emb)
+        with self._lock:
+            for row in rows:
+                emb = json.loads(row["embedding"])
+                emp_id = row["id"]
+                self._registry[emp_id] = {
+                    "face_id": row["face_id"],
+                    "name": row["name"],
+                    "embedding": np.array(emb, dtype=np.float32),
+                }
+            self._rebuild_faiss_index()
         log.info(f"✅ Loaded {len(rows)} employee embeddings from database")
 
     # ── Embedding Extraction ───────────────────────────────────────────────────
@@ -193,7 +235,7 @@ class FaceEngine:
         Full pipeline on a single frame.
         When InsightFace ONNX is active, uses get_faces() which does
         detection + landmark alignment + embedding in one pass — the most
-        accurate path.  Falls back to YOLOv8 + separate embedding otherwise.
+        accurate path.  Falls back to YOLO11 + separate embedding otherwise.
         Returns: {annotated_frame, detections}
         """
         if not self._initialized:
@@ -246,6 +288,7 @@ class FaceEngine:
                     "employee_id": resolved_id,
                     "face_id":     entry["face_id"],
                     "name":        entry["name"],
+                    "employee_name": entry["name"],
                     "confidence":  round(float(match_conf), 3),
                     "bbox":        [x1, y1, x2, y2],
                     "recognized":  True,
@@ -254,7 +297,7 @@ class FaceEngine:
 
             return {"annotated_frame": annotated, "detections": detections}
 
-        # ── Fallback path: YOLOv8 detect → separate embedding ────────────────
+        # ── Fallback path: YOLO11 detect → separate embedding ────────────────
         face_bboxes = self._detect_faces(frame)
         for idx, bbox in enumerate(face_bboxes):
             x1, y1, x2, y2, det_conf = bbox
@@ -278,22 +321,19 @@ class FaceEngine:
                 label = f"{entry['name']} [{entry['face_id']}]"
                 color = (0, 220, 100)
                 conf_display = match_conf
-            else:
-                label = "Unknown"
-                color = (0, 60, 220)
-                conf_display = 0.0
 
-            self._draw_detection(annotated, x1, y1, x2, y2, label, color, conf_display)
-            detections.append({
-                "track_id":    track_id,
-                "employee_id": resolved_id,
-                "face_id":     self._registry[resolved_id]["face_id"] if resolved_id and resolved_id in self._registry else None,
-                "name":        self._registry[resolved_id]["name"] if resolved_id and resolved_id in self._registry else "Unknown",
-                "confidence":  round(float(conf_display), 3),
-                "bbox":        [x1, y1, x2, y2],
-                "recognized":  resolved_id is not None,
-                "confirmed":   stable_id is not None,
-            })
+                self._draw_detection(annotated, x1, y1, x2, y2, label, color, conf_display)
+                detections.append({
+                    "track_id":    track_id,
+                    "employee_id": resolved_id,
+                    "face_id":     entry["face_id"],
+                    "name":        entry["name"],
+                    "employee_name": entry["name"],
+                    "confidence":  round(float(conf_display), 3),
+                    "bbox":        [x1, y1, x2, y2],
+                    "recognized":  True,
+                    "confirmed":   stable_id is not None,
+                })
 
         return {"annotated_frame": annotated, "detections": detections}
 
@@ -350,28 +390,37 @@ class FaceEngine:
         return self._cosine_match(embedding)
 
     def _cosine_match(self, query_emb: np.ndarray) -> tuple[Optional[str], Optional[str], float]:
-        """Find best cosine match in registry."""
-        best_id = None
-        best_name = None
-        best_score = -1.0
-
+        """Find best cosine match using FAISS."""
         with self._lock:
-            for emp_id, data in self._registry.items():
-                ref_emb = data["embedding"]
-                score = float(np.dot(query_emb, ref_emb))  # both L2-normalized → cosine similarity
-                if score > best_score:
-                    best_score = score
-                    best_id = emp_id
-                    best_name = data["name"]
+            if self._faiss_index is None:
+                return None, None, 0.0
 
-        # Debug logging for diagnosis
-        if DEBUG_MATCHING and best_score > 0.25:
-            match_status = "✅ MATCHED" if best_score >= COSINE_THRESHOLD else "⚠️  BELOW_THRESHOLD"
-            log.debug(f"Cosine match: {best_name} = {best_score:.4f} ({match_status}, threshold={COSINE_THRESHOLD})")
+            # Normalize query for cosine similarity
+            norm = np.linalg.norm(query_emb)
+            if norm > 1e-6:
+                query_emb = query_emb / norm
+            
+            query_np = query_emb.reshape(1, -1).astype('float32')
+            scores, indices = self._faiss_index.search(query_np, 1)
+            
+            best_score = float(scores[0][0])
+            best_idx = int(indices[0][0])
 
-        if best_score >= COSINE_THRESHOLD:
-            return best_id, best_name, best_score
-        return None, None, best_score
+            best_name = "Unknown"
+            best_id = None
+            if best_idx != -1:
+                best_id = self._faiss_map[best_idx]
+                best_name = self._registry[best_id]["name"]
+
+            # Debug logging for diagnosis
+            if DEBUG_MATCHING and best_score > 0.25:
+                match_status = "✅ MATCHED" if best_score >= COSINE_THRESHOLD else "⚠️  BELOW_THRESHOLD"
+                log.debug(f"FAISS match: {best_name} = {best_score:.4f} ({match_status}, threshold={COSINE_THRESHOLD})")
+
+            if best_idx != -1 and best_score >= COSINE_THRESHOLD:
+                return best_id, best_name, best_score
+            
+            return None, None, best_score
 
     # ── Temporal Vote Buffer ───────────────────────────────────────────────────
 

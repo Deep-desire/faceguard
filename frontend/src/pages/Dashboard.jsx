@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getStats, getEvents } from "../api";
 import {
-  Camera, Users, Activity, Eye, TrendingUp, Clock
+  Camera, Users, Activity, Eye, TrendingUp, Clock, PackageSearch
 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { format, fromUnixTime } from "date-fns";
@@ -9,6 +10,7 @@ import { format, fromUnixTime } from "date-fns";
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [events, setEvents] = useState([]);
+  const navigate = useNavigate();
 
   useEffect(() => {
     fetchAll();
@@ -26,12 +28,13 @@ export default function Dashboard() {
   const chartData = buildHourlyData(events);
 
   const STAT_CARDS = stats ? [
-    { label: "Total Cameras",   value: stats.total_cameras,        icon: Camera,   color: "#3b9eff" },
-    { label: "Active Streams",  value: stats.active_cameras,       icon: Eye,      color: "#00e5a0" },
-    { label: "Employees",       value: stats.total_employees,      icon: Users,    color: "#a78bfa" },
-    { label: "Events Today",    value: stats.events_today,         icon: Activity, color: "#ffa502" },
-    { label: "Unique Detections",value: stats.unique_detections_today,icon:TrendingUp,color:"#ff6b6b"},
-    { label: "Registered Faces",value: stats.registered_faces,     icon: Users,    color: "#00e5a0" },
+    { label: "Total Cameras",   value: stats.total_cameras,        icon: Camera,   color: "#3b9eff", to: "/cameras" },
+    { label: "Active Streams",  value: stats.active_cameras,       icon: Eye,      color: "#00e5a0", to: "/live"    },
+    { label: "Employees",       value: stats.total_employees,      icon: Users,    color: "#a78bfa", to: "/employees" },
+    { label: "Events Today",    value: stats.events_today,         icon: Activity, color: "#ffa502", to: "/events" },
+    { label: "Unique Detections",value: stats.unique_detections_today,icon:TrendingUp,color:"#ff6b6b", to: "/events" },
+    { label: "Objects Today",   value: stats.objects_today,        icon: PackageSearch, color: "#f59e0b", to: "/objects" },
+    { label: "Registered Faces",value: stats.registered_faces,     icon: Users,    color: "#00e5a0", to: "/employees" },
   ] : [];
 
   return (
@@ -46,7 +49,12 @@ export default function Dashboard() {
       {/* Stat Cards */}
       <div className="stats-grid">
         {STAT_CARDS.map((s) => (
-          <div className="stat-card" key={s.label} style={{ "--stat-color": s.color }}>
+          <div
+            className="stat-card stat-card--clickable"
+            key={s.label}
+            style={{ "--stat-color": s.color }}
+            onClick={() => navigate(s.to)}
+          >
             <div className="stat-icon"><s.icon size={22} /></div>
             <div className="stat-value">{s.value ?? "—"}</div>
             <div className="stat-label">{s.label}</div>

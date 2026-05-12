@@ -9,8 +9,9 @@
 #   This crash disconnects all live camera streams.
 
 $env:PYTHONUNBUFFERED = "1"
+Set-Location (Join-Path $PSScriptRoot "..")
 
-python -m uvicorn main:app `
+python -m uvicorn backend.main:app `
     --host 0.0.0.0 `
     --port 8000 `
     --reload `

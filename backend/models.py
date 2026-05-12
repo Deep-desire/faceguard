@@ -72,3 +72,22 @@ class DetectionEvent(BaseModel):
     track_id: Optional[str] = None
     timestamp: float
     frame_b64: Optional[str] = None
+
+
+class ObjectDetection(BaseModel):
+    object_id: str
+    camera_id: str
+    employee_id: Optional[str] = None
+    employee_name: Optional[str] = None
+    object_label: str
+    confidence: Optional[float] = None
+    track_id: Optional[str] = None
+    bbox: Optional[list[int]] = None
+    snapshot_path: Optional[str] = None
+    appearance_hash: Optional[str] = None
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    occurrence_count: Optional[int] = None
+
+    class Config:
+        from_attributes = True

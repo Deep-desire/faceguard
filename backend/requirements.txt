@@ -2,9 +2,11 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.12
 pydantic==2.9.2
+websockets==12.0
 
 # Face Detection & Recognition
-ultralytics==8.3.0          # YOLOv8
+faiss-cpu==1.8.0            # Vector similarity search
+ultralytics==8.3.0          # YOLO11
 # NOTE: yolov8n-face.pt is NOT auto-downloaded.
 #       Manually downloaded from: https://github.com/lindevs/yolov8-face/releases/latest/download/yolov8n-face-lindevs.pt
 onnxruntime==1.19.2         # Runtime for ONNX models
